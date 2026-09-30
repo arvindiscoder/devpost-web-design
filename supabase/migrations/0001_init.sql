@@ -224,14 +224,23 @@ as $$
 $$;
 
 -- 5.3 The JWT role of the caller ('anon' | 'authenticated' | 'service_role').
+--     MUST be read from the JWT claim, never from the `role` GUC: inside a
+--     SECURITY DEFINER function PostgreSQL switches the role to the function
+--     owner, so `current_setting('role')` would report the owner and every
+--     "is this an anon portal call?" check would silently pass.
+--     Modern PostgREST exposes the claims as `request.jwt.claims` (jsonb); the
+--     singular `request.jwt.claim.role` is kept only for older installs.
 create or replace function public.caller_role()
 returns text
 language sql
 stable
 as $$
   select coalesce(
+    nullif(
+      nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'role',
+      ''
+    ),
     nullif(current_setting('request.jwt.claim.role', true), ''),
-    nullif(current_setting('role', true), ''),
     'anon'
   );
 $$;
@@ -277,12 +286,28 @@ $$;
 create or replace function public.guard_portal_deliverable_write()
 returns trigger
 language plpgsql
-security definer
+security invoker
 set search_path = public
 as $$
 begin
+  -- Only PostgREST requests carry JWT claims. Everything else -- Supabase's
+  -- auth-user deletion (cascades workspaces -> clients -> deliverables),
+  -- the SQL editor, migrations -- must pass through untouched.
+  if current_setting('request.jwt.claims', true) is null
+     and current_setting('request.jwt.claim.role', true) is null then
+    if tg_op = 'DELETE' then
+      return old;
+    else
+      return new;
+    end if;
+  end if;
+
   if public.caller_role() <> 'anon' then
-    return new;                                   -- agency / service_role: trusted
+    if tg_op = 'DELETE' then
+      return old;
+    else
+      return new;
+    end if;
   end if;
 
   if tg_op = 'DELETE' then
@@ -290,46 +315,46 @@ begin
       using errcode = '42501';
   end if;
 
-  if new.client_id     is distinct from old.client_id
-  or new.title         is distinct from old.title
-  or new.description   is distinct from old.description
-  or new.file_url      is distinct from old.file_url
-  or new.file_path     is distinct from old.file_path
-  or new.file_name     is distinct from old.file_name
-  or new.file_size     is distinct from old.file_size
-  or new.file_type     is distinct from old.file_type
-  or new.created_at    is distinct from old.created_at
-  or new.due_date      is distinct from old.due_date
-  or new.revision      is distinct from old.revision
-  or new.feedback_at   is distinct from old.feedback_at
-  or new.approved_at   is distinct from old.approved_at
-  then
-    raise exception 'Portal clients cannot modify deliverable metadata.'
-      using errcode = '42501';
-  end if;
-
-  -- Feedback must be cleared whenever the agency puts the item back in review.
-  if new.status = 'pending_review' and old.status is distinct from new.status then
-    new.client_feedback := null;
-    new.feedback_at     := null;
-  end if;
-
-  -- An approval is only ever valid from the pending_review state. The
-  -- timestamp is stamped by the database, never accepted from the caller.
-  if new.status = 'approved' and old.status <> 'approved' then
-    if old.status <> 'pending_review' then
-      raise exception 'Only deliverables pending review can be approved.'
+  if tg_op = 'UPDATE' then
+    if new.client_id     is distinct from old.client_id
+    or new.title         is distinct from old.title
+    or new.description   is distinct from old.description
+    or new.file_url      is distinct from old.file_url
+    or new.file_path     is distinct from old.file_path
+    or new.file_name     is distinct from old.file_name
+    or new.file_size     is distinct from old.file_size
+    or new.file_type     is distinct from old.file_type
+    or new.created_at    is distinct from old.created_at
+    or new.due_date      is distinct from old.due_date
+    or new.revision      is distinct from old.revision
+    or new.feedback_at   is distinct from old.feedback_at
+    or new.approved_at   is distinct from old.approved_at
+    then
+      raise exception 'Portal clients cannot modify deliverable metadata.'
         using errcode = '42501';
     end if;
-    new.approved_at := timezone('utc', now());
+
+    if new.status = 'pending_review' and old.status is distinct from new.status then
+      new.client_feedback := null;
+      new.feedback_at     := null;
+    end if;
+
+    if new.status = 'approved' and old.status <> 'approved' then
+      if old.status <> 'pending_review' then
+        raise exception 'Only deliverables pending review can be approved.'
+          using errcode = '42501';
+      end if;
+      new.approved_at := timezone('utc', now());
+    end if;
+
+    if old.status = 'approved' and new.status <> 'approved' then
+      new.approved_at := null;
+    end if;
+
+    return new;
   end if;
 
-  -- Revoking an approval must clear the timestamp so the badge never lies.
-  if old.status = 'approved' and new.status <> 'approved' then
-    new.approved_at := null;
-  end if;
-
-  return new;
+  return coalesce(new, old);
 end;
 $$;
 
@@ -408,6 +433,9 @@ create policy "owners manage their deliverables"
   with check (public.is_client_owner(client_id));
 
 -- Passwordless portal: read the deliverable list + record the decision.
+-- `status <> 'draft'` is the load-bearing clause: without it a portal token
+-- could enumerate every internal draft by id. The server action filters too,
+-- but RLS is the boundary that actually holds.
 drop policy if exists "portal clients read their deliverables" on public.deliverables;
 create policy "portal clients read their deliverables"
   on public.deliverables
@@ -415,6 +443,7 @@ create policy "portal clients read their deliverables"
   to anon, authenticated
   using (
     public.caller_role() = 'anon'
+    and deliverables.status <> 'draft'
     and exists (
       select 1 from public.clients c
       where c.id = deliverables.client_id
@@ -430,6 +459,7 @@ create policy "portal clients action their deliverables"
   to anon, authenticated
   using (
     public.caller_role() = 'anon'
+    and deliverables.status <> 'draft'
     and exists (
       select 1 from public.clients c
       where c.id = deliverables.client_id
@@ -439,6 +469,7 @@ create policy "portal clients action their deliverables"
   )
   with check (
     public.caller_role() = 'anon'
+    and deliverables.status <> 'draft'
     and exists (
       select 1 from public.clients c
       where c.id = deliverables.client_id
