@@ -160,3 +160,41 @@ export async function signOut(): Promise<void> {
   await supabase.auth.signOut();
   redirect("/login");
 }
+
+/* -------------------------------------------------------------------------- */
+/*  Google OAuth                                                                */
+/* -------------------------------------------------------------------------- */
+
+/** Path-only redirect target. Anything else (`//evil.com`, an absolute URL) is
+ *  rejected so the OAuth `redirectTo` can never be pointed off-site. */
+function safeNext(value: FormDataEntryValue | null): string {
+  const raw = typeof value === "string" ? value : "";
+  if (!raw.startsWith("/") || raw.startsWith("//")) return "/dashboard";
+  return raw;
+}
+
+/**
+ * Hands the browser off to Google's consent screen. The PKCE verifier is
+ * written to a cookie by the Supabase SSR client, and `/auth/callback` swaps
+ * the returned `?code=` for the session.
+ */
+export async function signInWithGoogle(formData: FormData): Promise<void> {
+  const next = safeNext(formData.get("next"));
+  const supabase = createClient();
+
+  const { data, error } = await supabase.auth.signInWithOAuth({
+    provider: "google",
+    options: {
+      redirectTo: `${env.appUrl}/auth/callback?next=${encodeURIComponent(next)}`,
+      queryParams: { prompt: "select_account" },
+    },
+  });
+
+  const target = data?.url;
+  if (error || !target) {
+    console.error("google sign-in could not start:", error?.message);
+    redirect("/login?error=google_unavailable");
+  }
+
+  redirect(target);
+}
