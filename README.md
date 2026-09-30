@@ -383,13 +383,25 @@ npm install
 
 ### 6.4 Apply the database migration
 
+Run these **three files, in order**. Each is idempotent.
+
+| # | File | What it does |
+|---|------|--------------|
+| 1 | [`supabase/migrations/0001_init.sql`](supabase/migrations/0001_init.sql) | Tables, enums, RLS policies, storage bucket, realtime |
+| 2 | [`supabase/0002_security_fix.sql`](supabase/0002_security_fix.sql) | Corrects `caller_role()` (JWT claim lookup) and stops the portal RLS policies from exposing `draft` deliverables |
+| 3 | [`supabase/0003_cascade_fix.sql`](supabase/0003_cascade_fix.sql) | Makes the column guard return `OLD` on `DELETE` and only fire on real PostgREST traffic, so `ON DELETE CASCADE` works |
+
+> Files 2 and 3 fix real, exploitable bugs and are already folded into
+> `0001_init.sql` — a **fresh** project only needs file 1. Run all three when
+> upgrading a database that was created before those fixes.
+
 **Option A — Dashboard (simplest)**
 
 1. Open **SQL Editor** → **New query**.
-2. Paste the entire contents of [`supabase/migrations/0001_init.sql`](supabase/migrations/0001_init.sql).
-3. Click **Run**.
+2. Paste the entire contents of file 1. Click **Run**.
+3. Repeat for files 2 and 3.
 
-You should see a `NOTICE` confirming 4 tables, the bucket, and the policy count.
+File 1 ends with a `NOTICE` confirming 4 tables, the bucket, and the policy count; files 2 and 3 each end with a `NOTICE` too.
 
 **Option B — Supabase CLI**
 
@@ -397,12 +409,29 @@ You should see a `NOTICE` confirming 4 tables, the bucket, and the policy count.
 npx supabase login
 npx supabase link --project-ref <your-project-ref>
 npx supabase db push
+psql "$DB_URL" -f supabase/0002_security_fix.sql
+psql "$DB_URL" -f supabase/0003_cascade_fix.sql
 ```
 
-> The migration is **idempotent** — every `CREATE` is guarded and every
-> `CREATE POLICY` starts with a `DROP POLICY IF EXISTS`, so re-running it on an
+> The migrations are **idempotent** — every `CREATE` is guarded and every
+> `CREATE POLICY` starts with a `DROP POLICY IF EXISTS`, so re-running them on an
 > existing project is safe. If you only need to create or repair the storage
 > bucket, run [`supabase/setup-storage.sql`](supabase/setup-storage.sql) instead.
+
+### 6.4.1 Verify the installation
+
+```bash
+npm run e2e
+```
+
+`scripts/e2e.mjs` is a 26-assertion suite that runs against your **live**
+database. It provisions a throwaway auth user, then checks RLS isolation, the
+magic-link lifecycle (rotate/revoke), that drafts are invisible to portal
+links, that the column guard blocks metadata tampering, and that
+`ON DELETE CASCADE` actually cascades. It reads your keys from `.env.local`,
+prints no secrets, and leaves the database empty.
+
+Expected: `26 passed, 0 failed`.
 
 ### 6.5 Configure Supabase Auth
 
@@ -945,7 +974,10 @@ clientsync/
 │   ├── env.ts  status.ts  types.ts  utils.ts
 ├── supabase/
 │   ├── migrations/0001_init.sql  # ⭐ Full schema, RLS, storage, realtime
+│   ├── 0002_security_fix.sql     # JWT-claim role lookup + hide drafts
+│   ├── 0003_cascade_fix.sql      # Column guard: OLD on DELETE, PostgREST only
 │   └── setup-storage.sql         # Idempotent bucket bootstrap
+├── scripts/e2e.mjs                # 26-assertion live suite (npm run e2e)
 ├── middleware.ts                 # Session refresh + route protection
 ├── .env.example                  # Template — copy to .env.local
 ├── next.config.mjs               # Security headers, image config
