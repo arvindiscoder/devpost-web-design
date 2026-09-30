@@ -389,8 +389,8 @@ export default async function LandingPage() {
               Stop asking &ldquo;can you approve this?&rdquo;
             </h2>
             <p className="mx-auto mt-4 max-w-xl text-balance text-lg text-slate-600">
-              Set up your first client portal in under five minutes. Free
-              forever, no card, cancel by deleting the repo.
+              Set up your first client portal in 5 minutes. Free and easy to
+              use. Cancel anytime.
             </p>
             <div className="mt-8 flex justify-center">
               <Button size="lg" asChild>
