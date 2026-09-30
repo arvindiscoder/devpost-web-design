@@ -13,6 +13,10 @@
 [![Resend](https://img.shields.io/badge/Resend-3%2C000%2Fmo-000000?style=flat-square&logo=resend)](https://resend.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-22c55e?style=flat-square)](LICENSE)
 
+**Live demo → https://clientsync-lovat.vercel.app**
+
+To try it: create an account, add a client (this generates their magic link), upload a deliverable and mark it *Pending review* — the client link then shows the Approve / Request changes actions. The link works in any browser, no account needed on the client side.
+
 ---
 
 ## Table of Contents
